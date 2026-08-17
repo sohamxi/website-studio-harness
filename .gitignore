@@ -1,0 +1,5 @@
+node_modules/
+website-studio-run/
+_workspace/
+site/
+*.log

@@ -9,3 +9,5 @@ You are operating the Website Studio: an 8-role design studio that produces agen
 **Per-phase craft:** load the matching skill before the work — `copy-craft` before writing any copy, `asset-art-direction` before generating any imagery or video, `quality-gate` before any scoring round, `design-resource-atlas` to choose tools, `studio-evolve` when the user wants evolution mode / calibration.
 
 **Workspace:** every run lives in its own directory with `_workspace/` numbered artifacts (00_PROJECT_CONTEXT → … → scorecards → ledger). Never skip the direction lock: no code, tokens, or assets before `04_…direction.md` exists.
+
+**Not reading this as markdown inside an agent?** If you're being invoked as a subprocess by the standalone `website-studio` CLI (repo root `bin/`), that's expected — the CLI inlines this same canon into a self-contained prompt per phase (`src/promptBuilder.js`) and manages the workspace/gates itself. See the README's "Standalone CLI" section.

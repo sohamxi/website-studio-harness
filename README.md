@@ -2,11 +2,13 @@
 
 An 8-agent design studio for coding agents that one-shots agency-level websites — top-designer workflow phases, an award-caliber design constitution, adversarial critique loops, and a self-calibration protocol that evolves the harness from real user ratings.
 
-Built and battle-tested on Claude Code; installable into any agent that reads skills or markdown instructions.
+Built and battle-tested on Claude Code. Two ways to run it: as skills/agents inside a skills-aware coding agent, or as a standalone `website-studio` CLI that drives any headless agentic CLI (Claude Code, Codex, or your own) directly — see Install below.
 
 ## What's inside
 
 ```
+bin/website-studio.js   ← CLI entry point
+src/                     ← the standalone orchestrator (pipeline, gates, drivers, state) — zero runtime deps
 skills/
   website-studio/        ← the orchestrator: 10-phase pipeline + canon in references/
     references/constitution.md      (Award-Caliber Digital Experience Constitution)
@@ -19,9 +21,37 @@ skills/
 agents/                  ← 8 role definitions (creative-director … critic-gauntlet)
 ```
 
+The CLI in `bin/`+`src/` and the markdown in `skills/`+`agents/` are two front ends over the same canon: `src/promptBuilder.js` inlines the exact same constitution, input contract, role, and skill files that Claude Code loads natively, so a run behaves the same regardless of which front end drives it.
+
 **The pipeline:** normalize → discover → story → experience architecture → direction lock (devils-advocate attacked) → design system → copy deck ∥ art-directed asset generation → build (creative-technologist mandate) → motion → adversarial gauntlet loop (fresh critic each round, 12-dimension floors) → polish & ship. Every phase writes numbered artifacts to `_workspace/` so runs are resumable and auditable.
 
 ## Install
+
+### Standalone CLI (any agentic tool, no skill system required)
+The `website-studio` CLI is a thin, dependency-free Node orchestrator (`src/`) that drives the same 10-phase pipeline by shelling out to a headless agentic CLI once per phase — it needs no MCP server and no host-specific plugin format, so any tool that can run a shell command can drive it, or be driven by it.
+
+```bash
+npm install -g website-studio-harness   # or: npx website-studio-harness <command>
+
+website-studio run --dir ./ledgerline \
+  --brief "Ledgerline: a close-the-books tool for CFOs. Calm, credible, not corporate-boring." \
+  --driver claude          # or: --driver codex
+
+website-studio status --dir ./ledgerline
+```
+
+Each phase gets a **self-contained prompt** (constitution + input contract + role definition + relevant craft skill, all inlined) and runs as one headless call to the chosen driver, scoped to the run directory. State, resumability, and gate enforcement (no code before the direction lock, no ship before a PASS or an honestly-stated gap) live in the orchestrator, not in the driver.
+
+**Built-in drivers:** `claude` (`claude -p ... --permission-mode bypassPermissions`), `codex` (`codex exec -s workspace-write`). **`custom`** wires up anything else — pass a command template:
+```bash
+website-studio run --dir ./x --brief "..." \
+  --driver custom --driver-cmd "aider --yes --message-file {promptFile}"
+```
+`{promptFile}` and `{cwd}` are substituted; set `WEBSITE_STUDIO_DRIVER_CMD` once in your shell profile instead of passing `--driver-cmd` every time. `--driver dry-run` (the default when nothing else is on `PATH`) writes each phase's assembled prompt to `_workspace/.website-studio/prompts/` without invoking anything — useful for inspecting exactly what a phase would be asked to do.
+
+Other useful commands: `website-studio phase <id> --dir <path> [--force]` re-runs one phase; `website-studio phases` lists every phase id; `website-studio run --from <id> --force` resumes or redoes from a given point; `--max-rounds <n>` caps the gauntlet loop (default 4, matching `quality-gate`).
+
+**v1 scope, honestly stated:** an `ITERATE` verdict fans the fix round out to all five owner agents in parallel (each is told to touch only findings in its own remit and no-op otherwise) rather than parsing per-finding ownership out of the scorecard prose. A `STRUCTURAL` verdict stops the run for a manual `website-studio phase p3_direction --force` + devils-advocate pass rather than auto-rewinding — that decision is deliberately not one a mechanical loop should make for you. Evolution mode's gate-by-gate user review isn't wired into the CLI loop yet; run it inside Claude Code (below) for that path.
 
 ### Claude Code (full experience)
 ```bash

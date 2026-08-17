@@ -1,0 +1,35 @@
+{
+  "name": "website-studio-harness",
+  "version": "2.0.0",
+  "description": "8-agent design studio for coding agents — standalone CLI orchestrator plus markdown skills/agents installable into any agentic tool.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "website-studio": "./bin/website-studio.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "agents",
+    "skills",
+    "AGENTS.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sohamxi/website-studio-harness.git"
+  },
+  "keywords": [
+    "cli",
+    "agent-orchestrator",
+    "website-generator",
+    "claude-code",
+    "codex",
+    "mcp",
+    "design-studio"
+  ]
+}

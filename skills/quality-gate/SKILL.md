@@ -55,3 +55,5 @@ Run-1 evidence: four juries scored 8.5 by verifying the absence of defects; the 
 
 ## 5. Scorecard location
 `_workspace/10_gauntlet/round-N-scorecard.md` — instrument table, panel summaries, reconciled score per dimension, verdict, ranked fix list, movement vs. previous round.
+
+**Machine-readable verdict line:** the scorecard's FIRST line must be exactly `VERDICT: PASS`, `VERDICT: ITERATE`, `VERDICT: STRUCTURAL`, or `VERDICT: BLOCKED` (one token, nothing else on that line), before any prose. This is what lets the standalone `website-studio` CLI orchestrator (see repo root `src/`) parse the loop's outcome without an LLM in the loop; it costs nothing when a human or Claude Code is reading the file directly.
