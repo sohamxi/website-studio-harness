@@ -1,9 +1,11 @@
 import { join } from "node:path";
 import { PHASES, FIX_OWNERS, findPhase } from "./pipeline.js";
-import { buildPhasePrompt, buildFixPrompt, buildGauntletPrompt } from "./promptBuilder.js";
+import { buildPhasePrompt, buildFixPrompt, buildGauntletPrompt, buildFeedbackRequestPrompt, buildFeedbackIngestPrompt, buildFeedbackFixPrompt } from "./promptBuilder.js";
 import { runDriver } from "./drivers.js";
 import { outputsSatisfied, markPhase, readIfExists, recordGauntletRound, loadState } from "./workspace.js";
+import { recordTelemetry } from "./telemetry.js";
 import { log } from "./log.js";
+import { existsSync } from "node:fs";
 
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000; // 45 min per driver invocation
 const MAX_GAUNTLET_ROUNDS_DEFAULT = 4;
@@ -35,7 +37,7 @@ export async function executePhase(runDir, phase, ctx, promptOverride) {
 
   if (!result.ok || !outputsSatisfied(runDir, phase)) {
     log.warn(`  ${phase.id}: first attempt did not produce required outputs — retrying once`);
-    result = await attempt(true);
+    result = await attempt(true, 2);
   }
 
   const satisfied = outputsSatisfied(runDir, phase);
@@ -58,9 +60,10 @@ export async function executePhase(runDir, phase, ctx, promptOverride) {
   markPhase(runDir, phase.id, { status: "missing", finishedAt: new Date().toISOString() });
   return { ok: false, missing: true };
 
-  async function attempt(isRetry = false) {
+  async function attempt(isRetry = false, attemptN = 1) {
     const p = isRetry ? prompt + "\n\n---\nNOTE: this is a retry — the previous attempt did not produce the required output file(s). Make sure to actually write them." : prompt;
-    return runDriver(ctx.driverName, {
+    const startedAt = Date.now();
+    const res = await runDriver(ctx.driverName, {
       prompt: p,
       cwd: runDir,
       timeoutMs: ctx.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -69,6 +72,18 @@ export async function executePhase(runDir, phase, ctx, promptOverride) {
       log: log.child,
       phaseId: phase.id,
     });
+    recordTelemetry(runDir, {
+      phaseId: phase.id,
+      driver: ctx.driverName,
+      wallClockMs: Date.now() - startedAt,
+      ok: res.ok,
+      attempt: attemptN,
+      exitCode: res.code ?? null,
+      timedOut: Boolean(res.timedOut),
+      costUsd: res.costUsd ?? null,
+      tokens: res.tokens ?? null,
+    });
+    return res;
   }
 }
 
@@ -89,6 +104,7 @@ async function runFixRound(runDir, ctx, { scorecardPath, roundN }) {
   await Promise.all(
     FIX_OWNERS.map(async (agentId) => {
       const prompt = buildFixPrompt(agentId, { scorecardPath, roundN });
+      const startedAt = Date.now();
       const res = await runDriver(ctx.driverName, {
         prompt,
         cwd: runDir,
@@ -97,6 +113,16 @@ async function runFixRound(runDir, ctx, { scorecardPath, roundN }) {
         template: ctx.driverCmd,
         log: log.child,
         phaseId: `fix-${agentId}`,
+      });
+      recordTelemetry(runDir, {
+        phaseId: `fix-${agentId}-round${roundN}`,
+        driver: ctx.driverName,
+        wallClockMs: Date.now() - startedAt,
+        ok: res.ok,
+        exitCode: res.code ?? null,
+        timedOut: Boolean(res.timedOut),
+        costUsd: res.costUsd ?? null,
+        tokens: res.tokens ?? null,
       });
       log.child(`${res.ok ? "✔" : "✖"} ${agentId} fix pass`);
     })
@@ -209,4 +235,128 @@ export async function runPipeline(runDir, ctx) {
 export function summarizeState(runDir) {
   const state = loadState(runDir);
   return state;
+}
+
+const MAX_CLIENT_FEEDBACK_ROUNDS = 2;
+
+async function runDriverWithTelemetry(runDir, ctx, phaseId, prompt) {
+  const startedAt = Date.now();
+  const res = await runDriver(ctx.driverName, {
+    prompt,
+    cwd: runDir,
+    timeoutMs: ctx.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    model: ctx.model,
+    template: ctx.driverCmd,
+    log: log.child,
+    phaseId,
+  });
+  recordTelemetry(runDir, {
+    phaseId,
+    driver: ctx.driverName,
+    wallClockMs: Date.now() - startedAt,
+    ok: res.ok,
+    exitCode: res.code ?? null,
+    timedOut: Boolean(res.timedOut),
+    costUsd: res.costUsd ?? null,
+    tokens: res.tokens ?? null,
+  });
+  return res;
+}
+
+/**
+ * Autonomous post-ship client-feedback loop (see skills/client-feedback-loop).
+ * Bounded at MAX_CLIENT_FEEDBACK_ROUNDS — this is a fix loop, not an
+ * open-ended redesign loop. Two modes, both idempotent / resumable:
+ *   - "request": generate _workspace/13_client_feedback/request-round-N.md
+ *     and stop (waits for a real human to send it and get a real answer).
+ *   - "ingest": if response-round-N.md exists, convert it to a fix list,
+ *     dispatch to owner agents, and (if PASS) re-run p9_ship.
+ * The CLI decides which mode based on what's on disk; see cli.js `feedback`.
+ */
+export async function runClientFeedbackRound(runDir, ctx) {
+  if (!existsSync(join(runDir, "_workspace/12_ship-report.md"))) {
+    throw new Error(
+      `No ship report at _workspace/12_ship-report.md — run the pipeline through p9_ship before requesting client feedback.`
+    );
+  }
+
+  const dir = "_workspace/13_client_feedback";
+  let round = 1;
+  while (existsSync(join(runDir, dir, `round-${round}-fixlist.md`))) round++;
+
+  const requestPath = join(runDir, dir, `request-round-${round}.md`);
+  const responsePath = join(runDir, dir, `response-round-${round}.md`);
+  const responsePathRel = `${dir}/response-round-${round}.md`;
+
+  if (!existsSync(requestPath)) {
+    if (round > MAX_CLIENT_FEEDBACK_ROUNDS) {
+      log.warn(
+        `  client-feedback: already ran ${MAX_CLIENT_FEEDBACK_ROUNDS} rounds — per the harness's bounded-iteration rule, ` +
+          `not requesting another. Ship with open items stated honestly, or start a fresh direction pass if the concept itself needs to change.`
+      );
+      return { status: "capped", round: round - 1 };
+    }
+    log.step(`Client feedback — generating request form (round ${round}/${MAX_CLIENT_FEEDBACK_ROUNDS})`);
+    const prompt = buildFeedbackRequestPrompt({ roundN: round });
+    await runDriverWithTelemetry(runDir, ctx, `client-feedback-request-r${round}`, prompt);
+    if (existsSync(requestPath)) {
+      log.ok(`  wrote ${dir}/request-round-${round}.md — send this to the client, then save their answer to ${responsePathRel} and re-run.`);
+      return { status: "awaiting-request-review", round, requestPath };
+    }
+    log.warn(`  client-feedback: request form was not written — check the driver's output above.`);
+    return { status: "failed", round };
+  }
+
+  if (!existsSync(responsePath)) {
+    log.warn(`  client-feedback: waiting for ${responsePathRel} — no client response yet. Nothing to ingest.`);
+    return { status: "awaiting-response", round, requestPath };
+  }
+
+  log.step(`Client feedback — ingesting response (round ${round})`);
+  const ingestPrompt = buildFeedbackIngestPrompt({ roundN: round, responsePath: responsePathRel });
+  await runDriverWithTelemetry(runDir, ctx, `client-feedback-ingest-r${round}`, ingestPrompt);
+
+  const fixlistRel = `${dir}/round-${round}-fixlist.md`;
+  const fixlistText = readIfExists(join(runDir, fixlistRel));
+  const verdict = fixlistText?.match(/^VERDICT:\s*(PASS|ITERATE|STRUCTURAL)\b/m)?.[1] ?? null;
+
+  if (!verdict) {
+    log.warn(`  client-feedback: couldn't parse a VERDICT line from the fixlist — stopping for manual review.`);
+    return { status: "unparseable", round, fixlistPath: fixlistRel };
+  }
+  log.ok(`  round ${round} client verdict: ${verdict}`);
+
+  if (verdict === "STRUCTURAL") {
+    log.warn(
+      `  client-feedback: STRUCTURAL — the client's feedback points at the direction itself, not an execution gap. ` +
+        `This needs a new Phase 3 pass (website-studio phase p3_direction --force), not a mechanical fix round.`
+    );
+    return { status: "structural", round, fixlistPath: fixlistRel };
+  }
+
+  if (verdict === "PASS") {
+    log.ok(`  client-feedback: PASS — no fix round needed. Re-running ship report to note the client sign-off.`);
+    await executePhase(runDir, findPhase("p9_ship"), { ...ctx, force: true });
+    return { status: "pass", round, fixlistPath: fixlistRel };
+  }
+
+  // ITERATE
+  log.step(`Client feedback round ${round} ITERATE — dispatching fix round to owner agents`);
+  await Promise.all(
+    FIX_OWNERS.map(async (agentId) => {
+      const prompt = buildFeedbackFixPrompt(agentId, { fixlistPath: fixlistRel, roundN: round });
+      const res = await runDriverWithTelemetry(runDir, ctx, `client-feedback-fix-${agentId}-r${round}`, prompt);
+      log.child(`${res.ok ? "✔" : "✖"} ${agentId} client-feedback fix pass`);
+    })
+  );
+  log.step(`Re-running ship report after client-feedback round ${round} fixes`);
+  await executePhase(runDir, findPhase("p9_ship"), { ...ctx, force: true });
+
+  if (round >= MAX_CLIENT_FEEDBACK_ROUNDS) {
+    log.warn(
+      `  client-feedback: round ${round} was the last allowed round (max ${MAX_CLIENT_FEEDBACK_ROUNDS}). ` +
+        `Shipping with any remaining open items stated honestly in the ship report, per the harness's bounded-iteration rule.`
+    );
+  }
+  return { status: "iterated", round, fixlistPath: fixlistRel };
 }

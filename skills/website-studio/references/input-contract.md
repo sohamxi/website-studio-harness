@@ -22,7 +22,9 @@ Explicitly provided facts, product details, brand requirements, mandatory colors
 
 ## 3. Phase 0 — normalize the ask
 
-Convert the raw request + PROJECT object into `_workspace/00_PROJECT_CONTEXT.md` — the shared source of truth for every downstream agent. It must contain: **Company** · **Offering** · **Audience** · **Business objective** · **Primary conversion** · **Brand** (existing identity + constraints) · **Creative ambition** · **Content reality** (exists vs must be produced) · **Technical reality** · **Non-negotiables** · **Open assumptions** · **Unknowns**.
+**Check for a client intake first.** If `_workspace/00_input/client-intake.md` exists (see `client-intake-template.md` for the form), read it before inferring anything — every field the client answered there is `PROVIDED`, not `DERIVED`, and is authoritative per §2 below. This matters most for §7 of that form (reference anchors with client-assigned scores): it directly sets the audience-density register (visual rhythm, sufficiency) and must not be silently overridden by a studio guess like "sparse is more premium." Absence of the file is normal — fall back to full inference as usual.
+
+Convert the raw request + PROJECT object + any client intake into `_workspace/00_PROJECT_CONTEXT.md` — the shared source of truth for every downstream agent. It must contain: **Company** · **Offering** · **Audience** · **Business objective** · **Primary conversion** · **Brand** (existing identity + constraints) · **Creative ambition** · **Content reality** (exists vs must be produced) · **Technical reality** · **Non-negotiables** · **Open assumptions** · **Unknowns** · **Deciding questions** (from client intake §6 if provided, else derived — this is what quality-gate §2C scores sufficiency against) · **Reference anchors** (from client intake §7 if provided, with client scores; else derived from Phase 1 research and marked DERIVED).
 
 ## 4. Do not block the pipeline for non-critical missing information
 

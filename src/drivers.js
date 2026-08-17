@@ -41,7 +41,10 @@ function spawnStreamed(cmd, args, { cwd, timeoutMs, input, log }) {
   });
 }
 
-/** claude -p, headless, permission-safe for an unattended run. */
+/** claude -p, headless, permission-safe for an unattended run.
+ *  Uses --output-format json so cost/token usage can be parsed for telemetry
+ *  (falls back to treating the run as ok/failed only if parsing fails —
+ *  never fabricates a cost number). */
 async function claudeDriver({ prompt, cwd, timeoutMs, model, log }) {
   const args = [
     "-p",
@@ -49,11 +52,60 @@ async function claudeDriver({ prompt, cwd, timeoutMs, model, log }) {
     "--permission-mode",
     "bypassPermissions",
     "--output-format",
-    "text",
+    "json",
   ];
   if (model) args.push("--model", model);
   log?.(`→ claude -p (cwd=${cwd})`);
-  return spawnStreamed("claude", args, { cwd, timeoutMs, log });
+  const result = await spawnCaptured("claude", args, { cwd, timeoutMs, log });
+  return { ...result, ...parseClaudeJsonUsage(result.stdout, log) };
+}
+
+/** Like spawnStreamed but captures stdout (needed to parse --output-format json)
+ *  while still streaming stderr live for visibility during a headless run. */
+function spawnCaptured(cmd, args, { cwd, timeoutMs, log }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "inherit"] });
+    let stdout = "";
+    let timedOut = false;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+        }, timeoutMs)
+      : null;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.on("error", (err) => {
+      if (timer) clearTimeout(timer);
+      reject(new Error(`failed to launch "${cmd}": ${err.message}`));
+    });
+    child.on("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) log?.(`⏱  "${cmd}" timed out after ${timeoutMs}ms and was killed`);
+      resolve({ ok: code === 0 && !timedOut, code, signal, timedOut, stdout });
+    });
+  });
+}
+
+/** Best-effort extraction of cost/token usage from `claude --output-format json`.
+ *  Returns nulls (never fabricated numbers) if the shape doesn't match what's
+ *  expected — the CLI's JSON schema is not a stable public contract. */
+function parseClaudeJsonUsage(stdout, log) {
+  try {
+    const parsed = JSON.parse(stdout);
+    const costUsd = typeof parsed.total_cost_usd === "number" ? parsed.total_cost_usd : null;
+    const usage = parsed.usage ?? {};
+    const tokens =
+      (usage.input_tokens ?? 0) +
+      (usage.output_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) || null;
+    return { costUsd, tokens };
+  } catch {
+    log?.(`  (telemetry: couldn't parse claude's --output-format json for cost/tokens — leaving both null)`);
+    return { costUsd: null, tokens: null };
+  }
 }
 
 /** codex exec, sandboxed to the run directory, prompt via stdin. */
