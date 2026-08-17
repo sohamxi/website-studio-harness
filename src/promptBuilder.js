@@ -105,3 +105,66 @@ ${prevScorecardPath ? `Previous round's scorecard: \`${prevScorecardPath}\`. Ver
     `_workspace/10_gauntlet/round-${roundN}-scorecard.md`
   );
 }
+
+/** Prompt to generate the client-facing feedback request form (client-feedback-loop Step 1). */
+export function buildFeedbackRequestPrompt({ roundN }) {
+  // client-feedback-loop lives outside skills/website-studio/, read it directly.
+  const skillText = readHarnessFile("skills/client-feedback-loop/SKILL.md");
+  const templateText = readHarnessFile("skills/client-feedback-loop/references/feedback-form-template.md");
+  const taskLines = [
+    "## Task",
+    "",
+    "Read `_workspace/00_PROJECT_CONTEXT.md` (for the deciding questions) and `_workspace/12_ship-report.md` (for the live site location).",
+    "Fill in the template above (do not just copy placeholders) and write it to " +
+      `\`_workspace/13_client_feedback/request-round-${roundN}.md\`.`,
+    "Then STOP — do not fabricate a client response; a human sends this form and waits for a real answer.",
+  ].join("\n");
+  return [
+    RUNTIME_PREAMBLE,
+    "---\n# Skill: client-feedback-loop\n" + skillText,
+    "---\n# Form template to fill in\n" + templateText,
+    "---\n" + taskLines,
+  ].join("\n\n");
+}
+
+/** Prompt to convert a filled client response into a ranked, owner-keyed fix list (client-feedback-loop Step 2). */
+export function buildFeedbackIngestPrompt({ roundN, responsePath }) {
+  const skillText = readHarnessFile("skills/client-feedback-loop/SKILL.md");
+  const taskLines = [
+    "## Task",
+    "",
+    `Read the client's raw response at \`${responsePath}\`. Per the client-feedback-loop skill's Step 2, convert it into ` +
+      `\`_workspace/13_client_feedback/round-${roundN}-fixlist.md\`: first line exactly \`VERDICT: ITERATE\` or \`VERDICT: PASS\`, ` +
+      "then a ranked fix list (severity, file/section, defect in the client's own terms, fix direction, owner agent from: " +
+      "frontend-artisan, motion-choreographer, story-copywriter, visual-asset-director, design-systemist).",
+    "Do not editorialize away a client's dislike. If the feedback suggests the direction itself is wrong (not an execution gap), " +
+      "make the first line `VERDICT: STRUCTURAL` instead and explain why in the file — do not silently downgrade a structural " +
+      "problem into a list of small fixes.",
+  ].join("\n");
+  return [
+    RUNTIME_PREAMBLE,
+    "---\n# Canon: Award-Caliber Digital Experience Constitution\n" + CONSTITUTION,
+    "---\n# Skill: client-feedback-loop\n" + skillText,
+    "---\n" + taskLines,
+  ].join("\n\n");
+}
+
+/** Prompt for a client-feedback fix-round owner: same shape as a gauntlet fix, scoped to the client fixlist. */
+export function buildFeedbackFixPrompt(agentId, { fixlistPath, roundN }) {
+  const taskLines = [
+    `## Client feedback round ${roundN}`,
+    "",
+    `Read the fix list at \`${fixlistPath}\`. It lists findings from real client feedback, each keyed to an owner agent.`,
+    "",
+    `**Fix only the findings keyed to your role (${agentId}).** If none are keyed to you, do nothing and say so. ` +
+      "Edit the site in place (in `site/`) and any workspace artifact your role owns. When finished, append a short note to " +
+      `\`_workspace/13_client_feedback/round-${roundN}-fixes-${agentId}.md\` listing what you changed and, for anything you ` +
+      "judged not worth fixing, why (a client-feedback finding is a strong signal — do not dismiss one without a stated reason).",
+  ].join("\n");
+  return [
+    RUNTIME_PREAMBLE,
+    "---\n# Canon: Award-Caliber Digital Experience Constitution\n" + CONSTITUTION,
+    "---\n# Your role\n" + readAgent(agentId),
+    "---\n" + taskLines,
+  ].join("\n\n");
+}

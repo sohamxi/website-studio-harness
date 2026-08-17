@@ -3,8 +3,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { PHASES, findPhase } from "./pipeline.js";
 import { initWorkspace, loadState, outputsSatisfied } from "./workspace.js";
-import { executePhase, runPipeline, runGauntletLoop } from "./orchestrator.js";
+import { executePhase, runPipeline, runGauntletLoop, runClientFeedbackRound } from "./orchestrator.js";
 import { resolveDriverName, DRIVERS } from "./drivers.js";
+import { summarizeTelemetry } from "./telemetry.js";
 import { log, colors } from "./log.js";
 
 const VERSION = "2.0.0";
@@ -19,7 +20,9 @@ COMMANDS
   init                 create/seed a run directory with a brief
   run                  run the full pipeline (init if needed)
   phase <id>           run a single phase
-  status               show phase/gauntlet status for a run directory
+  status                show phase/gauntlet status for a run directory
+  report                show cost/wall-clock telemetry for a run directory
+  feedback              generate/ingest one round of client feedback (max 2, post-ship)
   phases                list all phase ids
   drivers              list available drivers and how to configure a custom one
   help                 show this help
@@ -41,7 +44,16 @@ EXAMPLES
   website-studio run --dir ./ledgerline --driver codex --from p6_build --force
   website-studio phase p2_story --dir ./ledgerline
   website-studio status --dir ./ledgerline
+  website-studio report --dir ./ledgerline
+  website-studio feedback --dir ./ledgerline
   website-studio run --dir ./x --brief "..." --driver custom --driver-cmd "cursor-agent -p {promptFile} --force"
+
+CLIENT FEEDBACK LOOP (post-ship, max 2 rounds — see skills/client-feedback-loop)
+  Run "website-studio feedback --dir <path>" after a ship report exists:
+  1st call with no request file yet   → writes _workspace/13_client_feedback/request-round-N.md, stops.
+  Send that form to the real client, save their answer to response-round-N.md.
+  2nd call (response file present)    → converts it to a fix list, dispatches fixes, re-ships.
+  Capped at 2 rounds; a STRUCTURAL verdict stops the loop for a manual Phase 3 pass, same as the gauntlet.
 `;
 
 function commonOptionsSpec() {
@@ -173,7 +185,68 @@ export async function main(argv) {
     return;
   }
 
+  if (command === "report") {
+    const { values } = parseArgs({ args: rest, options: commonOptionsSpec(), allowPositionals: false });
+    const runDir = resolve(values.dir);
+    printReport(runDir);
+    return;
+  }
+
+  if (command === "feedback") {
+    const { values } = parseArgs({ args: rest, options: commonOptionsSpec(), allowPositionals: false });
+    if (values.help) return console.log(HELP);
+    const runDir = resolve(values.dir);
+    const ctx = buildCtx(values, runDir);
+    log.info(`${colors.bold("website-studio")} v${VERSION} — client feedback — driver: ${colors.bold(ctx.driverName)} — dir: ${runDir}\n`);
+    const result = await runClientFeedbackRound(runDir, ctx);
+    console.log("");
+    switch (result.status) {
+      case "awaiting-request-review":
+        log.ok(`Request form written: ${result.requestPath}`);
+        log.info(`Send it to the client, save their reply to response-round-${result.round}.md, then re-run "website-studio feedback --dir \"${runDir}\"".`);
+        break;
+      case "awaiting-response":
+        log.warn(`Still waiting on a client response for round ${result.round}. Nothing to do yet.`);
+        break;
+      case "structural":
+        log.warn(`Round ${result.round} verdict: STRUCTURAL. See ${result.fixlistPath} — this needs a direction pass, not another fix round.`);
+        break;
+      case "pass":
+        log.ok(`Round ${result.round} verdict: PASS. Ship report updated.`);
+        break;
+      case "iterated":
+        log.ok(`Round ${result.round} verdict: ITERATE — fixes applied, ship report updated.`);
+        break;
+      case "capped":
+        log.warn(`Max client-feedback rounds (${result.round}) already used. Ship with open items stated, or start a fresh direction pass.`);
+        break;
+      default:
+        log.warn(`Client feedback round ${result.round}: ${result.status}`);
+    }
+    return;
+  }
+
   throw new Error(`Unknown command "${command}". Run "website-studio help" for usage.`);
+}
+
+function printReport(runDir) {
+  const t = summarizeTelemetry(runDir);
+  if (!t.entries.length) {
+    log.warn(`No telemetry recorded yet at ${join(runDir, "_workspace/00_input/run-telemetry.jsonl")}`);
+    return;
+  }
+  console.log(`${colors.bold("Telemetry:")} ${runDir}\n`);
+  console.log(`  Total driver calls: ${t.entries.length}`);
+  console.log(`  Total wall-clock:   ${(t.totalWallClockMs / 60000).toFixed(1)} min`);
+  console.log(
+    `  Total cost (USD):   ${t.costKnown ? "$" + t.totalCostUsd.toFixed(2) : colors.dim("unknown — driver did not report cost (dry-run/codex/custom drivers don't; claude driver does via --output-format json)")}`
+  );
+  console.log(`\n${colors.bold("By phase:")}`);
+  for (const [phaseId, s] of Object.entries(t.byPhase)) {
+    const retryNote = s.retries ? colors.yellow(` (${s.retries} retry)`) : "";
+    const failNote = s.failures ? colors.red(` (${s.failures} failed)`) : "";
+    console.log(`  ${phaseId.padEnd(28)} ${s.calls} call(s)  ${(s.wallClockMs / 1000).toFixed(0)}s${retryNote}${failNote}`);
+  }
 }
 
 function printStatus(runDir) {
@@ -213,4 +286,12 @@ function printFinalSummary(runDir, gauntletResult) {
     log.warn(`Delivered at max rounds without PASS (verdict: ${gauntletResult.verdict}). See the round-${gauntletResult.round} scorecard for the honestly-stated gap.`);
   }
   console.log(`\nArtifacts: ${join(runDir, "_workspace")}\nSite: ${join(runDir, "site")}`);
+  const t = summarizeTelemetry(runDir);
+  if (t.entries.length) {
+    console.log(
+      `Telemetry: ${t.entries.length} driver call(s), ${(t.totalWallClockMs / 60000).toFixed(1)} min wall-clock` +
+        (t.costKnown ? `, $${t.totalCostUsd.toFixed(2)}` : ", cost unknown (driver didn't report)") +
+        ` — full breakdown: website-studio report --dir "${runDir}"`
+    );
+  }
 }
